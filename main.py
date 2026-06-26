@@ -41,9 +41,10 @@ logging.basicConfig(
 logger = logging.getLogger("RepetitorBot")
 
 # ─── SOZLAMALAR ───────────────────────────────────────────────────────────────
-BOT_TOKEN = getenv("BOT_TOKEN")   # <-- O'z tokeningizni qo'ying
-ADMIN_IDS = getenv("ADMIN_IDS")              # <-- Admin Telegram ID lari
-DB_PATH = getenv("DB_PATH")
+BOT_TOKEN = getenv("BOT_TOKEN", "")        # <-- O'z tokeningizni qo'ying
+_admin_ids_raw = getenv("ADMIN_IDS", "")   # <-- Vergul bilan ajratilgan Admin ID lari: "123456,789012"
+ADMIN_IDS: List[int] = [int(x.strip()) for x in _admin_ids_raw.split(",") if x.strip().isdigit()]
+DB_PATH = getenv("DB_PATH", "repetitor.db")
 
 SUBJECTS = [
     "Matematika", "Fizika", "Kimyo", "Biologiya", "Tarix",
@@ -1064,6 +1065,10 @@ class Keyboards:
         return builder.as_markup()
 
 
+# ─── RUTER DEFINITSIYALARI ────────────────────────────────────────────────────
+main_router = Router()
+
+
 # ─── MATN YORDAMCHILARI ───────────────────────────────────────────────────────
 class Texts:
     @staticmethod
@@ -1104,9 +1109,6 @@ class Texts:
         )
 
 
-# ─── RUTER DEFINITSIYALARI ────────────────────────────────────────────────────
-main_router = Router()
-
 # ─── /START HANDLER ───────────────────────────────────────────────────────────
 @main_router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -1146,7 +1148,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     await message.answer(
         "🎓 *RepetitorBot*ga xush kelibsiz!\n\n"
-        "Siz kimсиз?",
+        "Siz kimsiz?",
         reply_markup=Keyboards.role_keyboard(),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -1228,12 +1230,11 @@ async def _process_phone(message: Message, state: FSMContext, phone: str):
         # Repetitor - qo'shimcha ma'lumotlar
         await state.update_data(selected_subjects=[])
         await message.answer(
-            "📚 O'qitadigan fanlaringizni tanlang:",
-            reply_markup=Keyboards.subjects_keyboard([]),
-            reply_markup_remove=True
+            "📚 O'qitadigan fanlaringizni tanlang (bir nechtasini tanlashingiz mumkin):",
+            reply_markup=ReplyKeyboardRemove()
         )
         await message.answer(
-            "📚 O'qitadigan fanlaringizni tanlang (bir nechtasini tanlashingiz mumkin):",
+            "Fan tanlang:",
             reply_markup=Keyboards.subjects_keyboard([])
         )
         await state.set_state(RegistrationSG.subjects)
@@ -1269,7 +1270,7 @@ async def reg_experience(message: Message, state: FSMContext):
     try:
         exp = int(message.text.strip())
         await state.update_data(experience=exp)
-        await message.answer("🏫 Qaysi universitetni tamomlagan sisiz? (yo'q bo'lsa 'Yo'q' deb yozing):")
+        await message.answer("🏫 Qaysi universitetni tamomlagan siz? (yo'q bo'lsa 'Yo'q' deb yozing):")
         await state.set_state(RegistrationSG.university)
     except ValueError:
         await message.answer("⚠️ Iltimos, raqam kiriting:")
@@ -1587,7 +1588,7 @@ async def student_bookings(message: Message):
             )
     builder.adjust(1)
 
-    await message.answer(text, reply_markup=builder.as_markup() if builder._button_count else None,
+    await message.answer(text, reply_markup=builder.as_markup() if builder.export() else None,
                          parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1716,7 +1717,7 @@ async def accept_reschedule(callback: CallbackQuery):
     booking_id = int(parts[2])
     new_date = parts[3]
     new_time = parts[4]
-    conn = sqlite3.connect(DB_PATH)
+    conn = db._get_conn()
     conn.execute(
         "UPDATE bookings SET lesson_date=?, lesson_time=?, status='confirmed' WHERE id=?",
         (new_date, new_time, booking_id)
@@ -1783,7 +1784,7 @@ async def tutor_bookings_filter(callback: CallbackQuery):
     builder.adjust(1)
     await callback.message.edit_text(
         text,
-        reply_markup=builder.as_markup() if builder._button_count else None,
+        reply_markup=builder.as_markup() if builder.export() else None,
         parse_mode=ParseMode.MARKDOWN
     )
     await callback.answer()
@@ -1960,7 +1961,7 @@ async def student_homeworks(message: Message):
         if hw["status"] == "checked" and hw.get("grade"):
             text += f"   💯 Baho: {hw['grade']}/10 | 💬 {hw.get('tutor_feedback','')}\n\n"
     builder.adjust(1)
-    await message.answer(text, reply_markup=builder.as_markup() if builder._button_count else None,
+    await message.answer(text, reply_markup=builder.as_markup() if builder.export() else None,
                          parse_mode=ParseMode.MARKDOWN)
 
 
@@ -2102,8 +2103,7 @@ async def student_tests(message: Message):
     if not user:
         return
     # Repetitorlarning testlarini ko'rsatish
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = db._get_conn()
     rows = conn.execute(
         "SELECT t.*, COUNT(tq.id) as question_count FROM tests t "
         "LEFT JOIN test_questions tq ON t.id=tq.test_id "
@@ -2189,8 +2189,7 @@ async def process_answer(callback: CallbackQuery, state: FSMContext):
 
     questions_ids = data["test_questions_list"]
     if current_idx < len(questions_ids):
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = db._get_conn()
         next_q = conn.execute("SELECT * FROM test_questions WHERE id=?", (questions_ids[current_idx],)).fetchone()
         conn.close()
         if next_q:
@@ -2258,7 +2257,7 @@ async def payments_menu(message: Message):
         builder.adjust(1)
         text += f"📊 Jami to'langan: *{total_paid:,.0f}* so'm\n"
         text += f"⏳ Kutilayotgan: *{total_pending:,.0f}* so'm"
-        await message.answer(text, reply_markup=builder.as_markup() if builder._button_count else None,
+        await message.answer(text, reply_markup=builder.as_markup() if builder.export() else None,
                              parse_mode=ParseMode.MARKDOWN)
 
     else:  # student
@@ -2485,8 +2484,7 @@ async def referral_info(message: Message):
         return
     bot_info = await message.bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={user['referral_code']}"
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = db._get_conn()
     count = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE referred_by=?", (user["id"],)).fetchone()["cnt"]
     conn.close()
     await message.answer(
@@ -2530,8 +2528,7 @@ async def view_profile(message: Message):
 async def admin_users(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = db._get_conn()
     total = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()["cnt"]
     students = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE role='student'").fetchone()["cnt"]
     tutors = conn.execute("SELECT COUNT(*) as cnt FROM users WHERE role='tutor'").fetchone()["cnt"]
@@ -2549,8 +2546,7 @@ async def admin_users(message: Message):
 async def admin_stats(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = db._get_conn()
     bookings = conn.execute("SELECT COUNT(*) as cnt FROM bookings").fetchone()["cnt"]
     income = conn.execute("SELECT COALESCE(SUM(amount),0) as total FROM payments WHERE status='paid'").fetchone()["total"]
     tests = conn.execute("SELECT COUNT(*) as cnt FROM tests").fetchone()["cnt"]
@@ -2626,8 +2622,7 @@ async def promo_expiry(message: Message, state: FSMContext):
 async def list_promos(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = db._get_conn()
     rows = conn.execute("SELECT * FROM promo_codes ORDER BY created_at DESC LIMIT 20").fetchall()
     conn.close()
     if not rows:
@@ -2780,6 +2775,9 @@ async def set_commands(bot: Bot):
 
 
 async def main():
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN muhit o'zgaruvchisi o'rnatilmagan!")
+
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -2791,8 +2789,11 @@ async def main():
     await set_commands(bot)
     logger.info("RepetitorBot ishga tushdi! 🚀")
 
-    # Reminder taskni ishga tushirish
-    asyncio.create_task(reminder_task(bot))
+    # Reminder taskni polling bilan birga ishga tushirish
+    async def on_startup(bot: Bot):
+        asyncio.create_task(reminder_task(bot))
+
+    dp.startup.register(on_startup)
 
     # Bot polling
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
